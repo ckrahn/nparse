@@ -1,0 +1,6 @@
+P -1451.2737, 2266.4932, -55.3476,  240, 0, 0,  3,  Bloodtribe_Prophet_(roam)
+P 1456.9435, -449.4617, -38.5359,  240, 0, 0,  3,  The_Sectoid_(roam)
+P 1103.4618, -598.4601, 156.7342,  240, 0, 0,  3,  Sun_Revenant_Magistrate
+P -1013.1002, -1529.5895, -22.6050,  240, 0, 0,  3,  Bloodtribe_Bonecollector
+P -165.8800, -2023.6128, -91.9649,  240, 0, 0,  3,  Bloodtribe_Agitator
+P -1980.7939, -1962.5735, -133.2218,  240, 0, 0,  3,  Bonetribe_Agitator
