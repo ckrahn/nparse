@@ -3,14 +3,23 @@ import os
 import sys
 import webbrowser
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QCursor, QFontDatabase, QIcon
-from PyQt5.QtWidgets import (QApplication, QFileDialog, QMenu, QMessageBox,
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QCursor, QFontDatabase, QIcon
+from PyQt6.QtWidgets import (QApplication, QFileDialog, QMenu, QMessageBox,
                              QSystemTrayIcon)
+import semver
 
 import parsers
-from helpers import config, logreader, resource_path, get_version
+from helpers import config, logreader, resource_path, get_version, location_service
 from helpers.settings import SettingsWindow
+
+try:
+    import pyi_splash  # noqa
+
+    pyi_splash.update_text('Done!')
+    pyi_splash.close()
+except:  # noqa
+    pass
 
 config.load('nparse.config.json')
 # validate settings file
@@ -20,7 +29,12 @@ os.environ['QT_SCALE_FACTOR'] = str(
     config.data['general']['qt_scale_factor'] / 100)
 
 
-CURRENT_VERSION = '0.5.1'
+CURRENT_VERSION = semver.VersionInfo(
+    major=0,
+    minor=6,
+    patch=6,
+    build="rc2"
+)
 if config.data['general']['update_check']:
     ONLINE_VERSION = get_version()
 else:
@@ -32,7 +46,6 @@ class NomnsParse(QApplication):
 
     def __init__(self, *args):
         super().__init__(*args)
-
 
         # Updates
         self._toggled = False
@@ -55,8 +68,10 @@ class NomnsParse(QApplication):
 
         if self.new_version_available():
             self._system_tray.showMessage(
-                "nParse Update".format(ONLINE_VERSION),
-                "New version available!\ncurrent: {}\nonline: {}".format(
+                "nParse Update",
+                "New version available!\n"
+                "Current: {}\n"
+                "Online: {}".format(
                     CURRENT_VERSION,
                     ONLINE_VERSION
                 ),
@@ -64,9 +79,15 @@ class NomnsParse(QApplication):
             )
 
     def _load_parsers(self):
+        self._parsers_dict = {
+            "maps": parsers.Maps(),
+            "spells": parsers.Spells(),
+            "discord": parsers.Discord(),
+        }
         self._parsers = [
-            parsers.Maps(),
-            parsers.Spells()
+            self._parsers_dict["maps"],
+            self._parsers_dict["spells"],
+            self._parsers_dict["discord"],
         ]
         for parser in self._parsers:
             if parser.name in config.data.keys() and 'geometry' in config.data[parser.name].keys():
@@ -92,25 +113,38 @@ class NomnsParse(QApplication):
             if self._log_reader:
                 self._log_reader.deleteLater()
                 self._log_reader = None
+            location_service.stop_location_service()
+            for parser in self._parsers:
+                try:
+                    parser.shutdown()
+                except:
+                    print("Failed to shutdown parser: %s" % parser.name)
             self._toggled = False
 
     def _parse(self, new_line):
         if new_line:
             timestamp, text = new_line  # (datetime, text)
             #  don't send parse to non toggled items, except maps.  always parse maps
-            for parser in [parser for parser in self._parsers if config.data[parser.name]['toggled'] or parser.name == 'maps']:
-                parser.parse(timestamp, text)
+            for parser in self._parsers:
+                if text.startswith('toggle_clickthrough_%s' % parser.name):
+                    config.data[parser.name]['clickthrough'] = (
+                        not config.data[parser.name]['clickthrough'])
+                    config.save()
+                    parser.set_flags()
+                elif text.startswith('toggle_%s' % parser.name):
+                    parser.toggle()
+                elif config.data[parser.name]['toggled'] or parser.name == 'maps':
+                    parser.parse(timestamp, text)
 
     def _menu(self, event):
         """Returns a new QMenu for system tray."""
         menu = QMenu()
-        menu.setAttribute(Qt.WA_DeleteOnClose)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         # check online for new version
-        new_version_text = ""
         if self.new_version_available():
-            new_version_text = "Update Available {}".format(ONLINE_VERSION)
+            new_version_text = "Update Available: {}".format(ONLINE_VERSION)
         else:
-            new_version_text = "Version {}".format(CURRENT_VERSION)
+            new_version_text = "Version: {}".format(CURRENT_VERSION)
 
         check_version_action = menu.addAction(new_version_text)
         menu.addSeparator()
@@ -126,10 +160,11 @@ class NomnsParse(QApplication):
 
         menu.addSeparator()
         settings_action = menu.addAction('Settings')
+        discord_conf_action = menu.addAction('Configure Discord')
         menu.addSeparator()
         quit_action = menu.addAction('Quit')
 
-        action = menu.exec_(QCursor.pos())
+        action = menu.exec(QCursor.pos())
 
         if action == check_version_action:
             webbrowser.open('https://github.com/nomns/nparse/releases')
@@ -143,22 +178,26 @@ class NomnsParse(QApplication):
                 self._toggle()
 
         elif action == settings_action:
-            if self._settings.exec_():
+            self._settings._set_values()
+            if self._settings.exec():
                 # Update required settings
                 for parser in self._parsers:
-                    if parser.windowOpacity() != config.data['general']['parser_opacity']:
-                        parser.setWindowOpacity(
-                            config.data['general']['parser_opacity'] / 100)
-                        parser.settings_updated()
+                    parser.set_flags()
+                    parser.settings_updated()
             # some settings are saved within other settings automatically
             # force update
             for parser in self._parsers:
                 if parser.name == "spells":
                     parser.load_custom_timers()
 
+        elif action == discord_conf_action:
+            self._parsers_dict["discord"].show_settings()
+
         elif action == quit_action:
             if self._toggled:
                 self._toggle()
+            else:
+                location_service.stop_location_service()
 
             # save parser geometry
             for parser in self._parsers:
@@ -166,9 +205,10 @@ class NomnsParse(QApplication):
                 config.data[parser.name]['geometry'] = [
                     g.x(), g.y(), g.width(), g.height()
                 ]
-                config.save()
+            config.save()
 
             self._system_tray.setVisible(False)
+            config.APP_EXIT = True
             self.quit()
 
         elif action in parser_toggles:
@@ -177,11 +217,8 @@ class NomnsParse(QApplication):
             parser.toggle()
 
     def new_version_available(self):
-        # this will only work if numbers go up
         try:
-            for (o, c) in zip(ONLINE_VERSION.split('.'), CURRENT_VERSION.split('.')):
-                if int(o) > int(c):
-                    return True
+            return ONLINE_VERSION > CURRENT_VERSION
         except:
             return False
 
@@ -198,7 +235,6 @@ if __name__ == "__main__":
     APP.setStyleSheet(open(resource_path('data/ui/_.css')).read())
     APP.setWindowIcon(QIcon(resource_path('data/ui/icon.png')))
     APP.setQuitOnLastWindowClosed(False)
-    APP.setAttribute(Qt.AA_EnableHighDpiScaling)
     QFontDatabase.addApplicationFont(
         resource_path('data/fonts/NotoSans-Regular.ttf'))
     QFontDatabase.addApplicationFont(

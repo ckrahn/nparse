@@ -3,9 +3,9 @@ import math
 import string
 import re
 
-from PyQt5.QtCore import QEvent, QObject, QRect, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar,
+from PyQt6.QtCore import QEvent, QObject, QRect, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QProgressBar,
                              QScrollArea, QSpinBox, QVBoxLayout, QPushButton)
 
 from helpers import ParserWindow, config, format_time, text_time_to_seconds
@@ -22,7 +22,7 @@ class Spells(ParserWindow):
 
         self._setup_ui()
 
-        self.spell_book = create_spell_book()
+        self.spell_book, self.text_you, self.text_other = create_spell_book()
         self._custom_timers = {}  # regex : CustomTimer
         self.load_custom_timers()
         self._casting = None  # holds Spell when casting
@@ -79,6 +79,28 @@ class Spells(ParserWindow):
                         '__custom__'
                     )
 
+        # There are three main cases:
+        # 1) Items that have cast messages like "<item> begins to glow."
+        # 2) Items that have no cast message, cast on you (mostly insta-clickies)
+        # 3) Items that have no cast message, cast on others
+        # Case 1 may require either compiling a list of these items and detecting
+        # them as triggers, or else opening it up entirely like this does.
+        # Case 2 requires completely opening up detection, but will also detect
+        # any other buff cast on you, which may include things you wouldn't expect
+        # but can also NOT include many spells (when text is shared with an AoE
+        # version). It would also not properly detect level of spell when cast
+        # by other people.
+        # Case 3 is essentially impossible to deal with.
+        if config.data['spells']['use_item_triggers'] and not self._spell_trigger:
+            if text in self.text_you:
+                spell = self.text_you[text]
+                spell_trigger = SpellTrigger(
+                    spell=spell,
+                    timestamp=timestamp
+                )
+                spell_trigger.spell_triggered.connect(self._spell_triggered)
+                self._spell_trigger = spell_trigger
+
         if self._spell_trigger:
             self._spell_trigger.parse(timestamp, text)
 
@@ -104,7 +126,7 @@ class Spells(ParserWindow):
               text[:26] == 'You try to cast a spell on'):
             self._remove_spell_trigger()
 
-            # Elongate self buff timers by time zoning
+        # Elongate self buff timers by time zoning
         elif text[:23] == 'LOADING, PLEASE WAIT...':
             self._spell_triggered()
             self._remove_spell_trigger()
@@ -116,12 +138,16 @@ class Spells(ParserWindow):
                     spell_widget.pause()
         elif self._zoning and text[:16] == 'You have entered':
             delay = (timestamp - self._zoning).total_seconds()
-            spell_target = self._spell_container.get_spell_target_by_name(
-                '__you__')
-            if spell_target:
-                for spell_widget in spell_target.spell_widgets():
-                    spell_widget.elongate(delay)
-                    spell_widget.resume()
+            # If zoning took longer than like two minutes, likely false alarm
+            if delay > 120:
+                self._zoning = None
+            else:
+                spell_target = self._spell_container.get_spell_target_by_name(
+                    '__you__')
+                if spell_target:
+                    for spell_widget in spell_target.spell_widgets():
+                        spell_widget.elongate(delay)
+                        spell_widget.resume()
 
     def _remove_spell_trigger(self):
         if self._spell_trigger:
@@ -132,7 +158,7 @@ class Spells(ParserWindow):
     def _level_change(self, _):
         config.data['spells']['level'] = self._level_widget.value()
         config.save()
-    
+
     def load_custom_timers(self):
         self._custom_timers = {}
         for item in config.data['spells']['custom_timers']:
@@ -153,10 +179,11 @@ class SpellContainer(QFrame):
 
     def __init__(self):
         super().__init__()
-        self.setLayout(QVBoxLayout())
+        self._layout = QVBoxLayout()
+        self.setLayout(self._layout)
         self.setObjectName('SpellContainer')
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().addStretch(1)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.addStretch(1)
 
     def add_spell(self, spell, timestamp, target='__you__'):
         spell_target = None
@@ -167,14 +194,14 @@ class SpellContainer(QFrame):
         if not spell_target:
             new = True
             spell_target = SpellTarget(target=target)
-            self.layout().addWidget(spell_target, 0)
+            self._layout.addWidget(spell_target, 0)
 
         spell_target.add_spell(spell, timestamp)
 
         if new:
             for x, widget in enumerate(sorted(self.findChildren(SpellTarget),
                                               key=lambda x: (int(x.target_label.property('TargetType')), x.name))):
-                self.layout().insertWidget(x, widget, 0)  # + 1 - skip target label
+                self._layout.insertWidget(x, widget, 0)  # + 1 - skip target label
 
     def spell_targets(self):
         """Returns a list of all SpellTargets."""
@@ -205,16 +232,17 @@ class SpellTarget(QFrame):
         self._setup_ui()
 
     def _setup_ui(self):
-        self.setLayout(QVBoxLayout())
-        self.layout().setContentsMargins(0, 0, 0, 0)
-        self.layout().setSpacing(0)
+        self._layout = QVBoxLayout()
+        self.setLayout(self._layout)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
         self.target_label = QLabel(self.title.title())
         self.target_label.setObjectName('SpellTargetLabel')
         self.target_label.setMaximumHeight(20)
-        self.target_label.setAlignment(Qt.AlignCenter)
+        self.target_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.target_label.mouseDoubleClickEvent = self._remove
-        self.layout().addWidget(self.target_label, 0)
-        self.layout().addStretch()
+        self._layout.addWidget(self.target_label, 0)
+        self._layout.addStretch()
 
     def _remove(self, event=None):
         self.setParent(None)
@@ -225,8 +253,8 @@ class SpellTarget(QFrame):
         return self.findChildren(SpellWidget)
 
     def childEvent(self, event):
-        if event.type() == QEvent.ChildRemoved:
-            if type(event.child()) == SpellWidget:
+        if event.type() == QEvent.Type.ChildRemoved:
+            if isinstance(event.child(), SpellWidget):
                 if not self.findChildren(SpellWidget):
                     self._remove()
         event.accept()
@@ -240,8 +268,8 @@ class SpellTarget(QFrame):
                 recast = True
                 sw.recast(timestamp)
         if not recast:
-            self.layout().addWidget(SpellWidget(spell, timestamp))
-        if self.name == '__you__' or self.name == '__custom__':
+            self._layout.addWidget(SpellWidget(spell, timestamp))
+        if self.name in ('__you__', '__custom__'):
             self.target_label.setProperty('TargetType', 0)  # user
         elif not target_type:  # treat target like enemy
             self.target_label.setProperty('TargetType', 2)  # enemy
@@ -251,7 +279,7 @@ class SpellTarget(QFrame):
 
         now = datetime.datetime.now()
         for x, widget in enumerate(sorted(self.findChildren(SpellWidget), key=lambda x: (x.end_time - now))):
-            self.layout().insertWidget(x + 1, widget)  # + 1 - skip target label
+            self._layout.insertWidget(x + 1, widget)  # + 1 - skip target label
 
 
 class SpellWidget(QFrame):
@@ -356,7 +384,7 @@ def get_spell_icon(icon_index):
     y = (file_row - 1) * 40
     icon_image = QPixmap(file_name)
     scaled_icon_image = icon_image.copy(QRect(x, y, 40, 40)).scaled(
-        15, 15, transformMode=Qt.SmoothTransformation)
+        15, 15, transformMode=Qt.TransformationMode.SmoothTransformation)
     label = QLabel()
     label.setPixmap(scaled_icon_image)
     label.setFixedSize(15, 15)
@@ -410,9 +438,9 @@ class SpellTrigger(QObject):
             msec_offset = (datetime.datetime.now() -
                            self.timestamp).total_seconds() * 1000
             self._times_up_timer.start(
-                self.spell.cast_time + config.data['spells']['casting_window_buffer'] - msec_offset)
+                int(self.spell.cast_time + config.data['spells']['casting_window_buffer'] - msec_offset))
             self._activate_timer.start(
-                self.spell.cast_time - config.data['spells']['casting_window_buffer'] - msec_offset)
+                int(self.spell.cast_time - config.data['spells']['casting_window_buffer'] - msec_offset))
         else:
             self.activated = True
 
@@ -445,10 +473,12 @@ class SpellTrigger(QObject):
 def create_spell_book():
     """ Returns a dictionary of Spell by k, v -> spell_name, Spell() """
     spell_book = {}
+    text_lookup_self = {}
+    text_lookup_other = {}
     with open('data/spells/spells_us.txt') as spell_file:
         for line in spell_file:
             values = line.strip().split('^')
-            spell_book[values[1]] = Spell(
+            spell = Spell(
                 id=int(values[0]),
                 name=values[1].lower(),
                 effect_text_you=values[6],
@@ -465,7 +495,10 @@ def create_spell_book():
                 type=int(values[83]),
                 spell_icon=int(values[144])
             )
-    return spell_book
+            spell_book[values[1]] = spell
+            text_lookup_self[spell.effect_text_you] = spell
+            text_lookup_other[spell.effect_text_other] = spell
+    return spell_book, text_lookup_self, text_lookup_other
 
 
 def get_spell_duration(spell, level):
@@ -481,16 +514,13 @@ def get_spell_duration(spell, level):
         spell_ticks = 0
     if formula == 1:
         spell_ticks = int(math.ceil(level / float(2.0)))
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 2:
         spell_ticks = int(math.ceil(level / float(5.0) * 3))
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 3:
         spell_ticks = int(level * 30)
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 4:
         if duration == 0:
             spell_ticks = 50
@@ -502,24 +532,19 @@ def get_spell_duration(spell, level):
             spell_ticks = 3
     if formula == 6:
         spell_ticks = int(math.ceil(level / float(2.0)))
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 7:
         spell_ticks = level
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 8:
         spell_ticks = level + 10
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 9:
         spell_ticks = int((level * 2) + 10)
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 10:
         spell_ticks = int(level * 3 + 10)
-        if spell_ticks > duration:
-            spell_ticks = duration
+        spell_ticks = min(spell_ticks, duration)
     if formula == 11:
         spell_ticks = duration
     if formula == 12:
@@ -538,12 +563,12 @@ def get_spell_duration(spell, level):
 
 class CustomTrigger:
 
-    def __init__(self, name='', text='', time='', **kwargs):
+    def __init__(self, name='', text='', time='', **_):
         self.name, self.text, self.time = name, text, time
 
     def to_list(self):
         return [self.name, self.text, self.time]
-    
+
     def __str__(self):
         return '{},{},{}'.format(
             self.name, self.text, self.time
